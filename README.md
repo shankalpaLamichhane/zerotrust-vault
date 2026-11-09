@@ -1,90 +1,133 @@
 # ZeroTrust-Vault
 
-> **Resilient Event-Streaming & Cryptographic Audit Ledger Architecture for Municipal and Public Sector Cloud Data Systems.**
+> **Resilient Event-Streaming & Cryptographic Audit Ledger for Critical Municipal and Public Sector Data Systems.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
-[![Architecture: Zero-Trust](https://img.shields.io/badge/Architecture-Zero--Trust-green.svg)](https://cisa.gov)
-[![Streaming: Apache Kafka](https://img.shields.io/badge/Streaming-Apache%20Kafka-orange.svg)](https://kafka.apache.org)
-[![Storage: PostgreSQL + S3 WORM](https://img.shields.io/badge/Storage-PostgreSQL%20%2B%20S3%20WORM-blue.svg)](https://aws.amazon.com)
+[![Build Status](https://img.shields.io/badge/Build-Passing-brightgreen.svg)]()
+[![Go Version](https://img.shields.io/badge/Go-1.22+-00ADD8.svg?logo=go)]()
+[![Kafka Support](https://img.shields.io/badge/Kafka-3.6+-orange.svg?logo=apachekafka)]()
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-15+-336791.svg?logo=postgresql)]()
+[![Docker](https://img.shields.io/badge/Docker-Compose-2496ED.svg?logo=docker)]()
 
 ---
 
-## 🏛️ Executive Summary
+## 📌 Problem & Threat Model
 
-**ZeroTrust-Vault** is an open-source, resilient cloud data pipeline engineered to safeguard critical municipal and public sector data systems (civil court records, land registry deeds, municipal tax rolls) against ransomware, unauthorized data alteration, and catastrophic hardware failures during cloud migration.
+Local governments, county courts, and public sector record registries face acute operational and security challenges when transitioning from on-premise infrastructure to cloud environments:
 
-Local governments and county administrations are rapidly migrating from legacy on-premise servers to cloud backbones. However, these systems face dual vulnerabilities:
-1. **Ransomware & Silent Data Corruption:** Hostile adversaries silently encrypt or alter historical land and court records.
-2. **Network Instability & Dual-Write Failure:** Unstable broadband links cause partial writes and lost transactions during cloud synchronization.
+1. **Dual-Write Vulnerability & In-Flight Data Loss:**  
+   Legacy municipal desktop applications frequently operate across constrained, unstable broadband links. Standard application-level dual-writes (`DB.Save()` followed by an external queue push) suffer from partial commit failures during network drops, causing unrecoverable data divergence between on-premise systems and cloud replicas.
+2. **Silent Historical Tampering (Pre-Ransomware Infiltration):**  
+   Modern cyber adversaries routinely compromise database credentials weeks before deploying ransomware. Historical records—such as property deeds, judicial dockets, and tax ledgers—are silently altered or encrypted without triggering standard boundary firewalls.
+3. **Backup Rebuild Latency (RTO & RPO Deficits):**  
+   Standard daily snapshots (e.g., `pg_dump` or daily volume snapshots) introduce an unacceptable Recovery Point Objective (RPO) of up to 24 hours of lost transactions, and a Recovery Time Objective (RTO) measured in weeks of civil downtime.
 
-ZeroTrust-Vault solves both challenges through an end-to-end, four-pillar distributed architecture.
+**ZeroTrust-Vault** is a lightweight, non-intrusive middleware engineered to solve these systemic failure modes through asynchronous event streaming, cryptographic ledger verification, and automated runtime anomaly interception.
 
 ---
 
-## ⚡ Core 4-Pillar Pipeline Architecture
+## 🏛️ System Architecture
 
 ```
-[Municipal Database] 
-        │
-        ▼ (Pillar 1: Zero-Loss Ingestion)
-   [Apache Kafka]  ──► Change Data Capture (CDC) with Exactly-Once Semantics (EOS)
-        │
-        ▼ (Pillar 2: Cryptographic Vault)
-[PostgreSQL + S3 WORM] ──► SHA-256 hash-chaining on WAL; immutable compliance storage
-        │
-        ▼ (Pillar 3: Autonomous AI Sentry)
-   [MCP + AI Agent]  ──► Real-time telemetry monitoring; cuts off ransomware in <200ms
-        │
-        ▼ (Pillar 4: Instant Recovery)
-[Kubernetes Snapshot] ──► 1-click cloud rebuild from uncorrupted verified event stream
+                                  ZeroTrust-Vault Architecture
+                                  
+     [Legacy On-Premise DB]                [Cloud Ingestion Layer]               [Immutable Storage]
+  ┌───────────────────────────┐         ┌──────────────────────────┐         ┌──────────────────────────┐
+  │   PostgreSQL / Oracle     │         │   Debezium Engine        │         │   PostgreSQL Target DB   │
+  │   (Write-Ahead Log)       │───────► │   (pgoutput plugin)      │───────► │   (Append-Only Store)    │
+  └───────────────────────────┘         └────────────┬─────────────┘         └────────────┬─────────────┘
+                                                     │                                    │
+                                                     ▼                                    ▼
+                                        ┌──────────────────────────┐         ┌──────────────────────────┐
+                                        │   Apache Kafka           │         │   AWS S3 Object Lock     │
+                                        │   (Partitioned Topics)   │         │   (WORM Compliance Mode) │
+                                        └────────────┬─────────────┘         └──────────────────────────┘
+                                                     │
+                                                     ▼
+                                        ┌──────────────────────────┐
+                                        │   Model Context Protocol │ ──► [Autonomous AI Sentry]
+                                        │   (MCP Telemetry Stream) │     (Query Entropy & Circuit Breaker)
+                                        └──────────────────────────┘
 ```
 
-### 1. Zero-Loss Real-Time Ingestion (Apache Kafka + Debezium CDC)
-* **Mechanism:** Attaches directly to the database Write-Ahead Log (WAL) via logical replication (`pgoutput`).
-* **Benefit:** Captures 100% of mutations without touching or rewriting 20-year-old legacy municipal desktop software.
-* **Guarantee:** Kafka transactional producers enforce **Strict FIFO Ordering** per parcel/case ID and **Exactly-Once Semantics (EOS)**, preventing duplicate or dropped records.
+---
 
-### 2. Cryptographic Tamper-Proof Vault (SHA-256 Chaining + S3 WORM)
-* **Mechanism:** Every database commit computes an unbroken SHA-256 cryptographic chain:
-  $$\text{Hash}_n = \text{SHA256}(\text{Record\_Data}_n + \text{Hash}_{n-1} + \text{Timestamp})$$
-* **Storage:** Event logs are streamed to **AWS S3 Object Lock in Compliance Mode** (Write Once, Read Many).
-* **Benefit:** Mathematical immutability. If an adversary or compromised admin alters a single digit in a property deed, the hash chain breaks instantly, satisfying **Federal Rules of Evidence 902(13)/(14)** for courtroom self-authentication.
+## ⚡ Core Engineering Pillars
 
-### 3. Autonomous AI Threat Sentry (Model Context Protocol - MCP)
-* **Mechanism:** An autonomous AI agent connects to query telemetry and Prometheus metrics via **Model Context Protocol (MCP)**.
-* **Detection:** Analyzes query velocity, Shannon entropy (identifying ransomware payload encryption), and anomalous bulk row modifications.
-* **Remediation:** Autonomously executes circuit-breakers to revoke compromised database credentials in **<200 milliseconds** before encryption spreads.
+### 1. Zero-Loss CDC Ingestion (Engineered in Go / Java)
+* **Log-Based Capture:** Attaches directly to the database Write-Ahead Log (WAL) at the disk level using PostgreSQL's logical replication stream (`pgoutput`), completely bypassing legacy application layers.
+* **Deterministic Sequencing:** Ingests mutations into Apache Kafka topics partitioned strictly by entity primary keys (`parcel_id`, `case_number`), guaranteeing strict FIFO ordering across distributed consumers.
+* **Transactional Exactly-Once Semantics (EOS):** Utilizes Kafka's transactional producer API (`enable.idempotence=true`) coupled with consumer read-committed boundaries, guaranteeing zero duplicate entries and zero dropped mutations under network partitions.
 
-### 4. Instant Disaster Recovery (Event Sourcing on Kubernetes)
-* **Mechanism:** Treats the database state as an immutable derivative of the verified event log.
-* **Recovery:** When a hardware failure or disaster occurs, a Kubernetes Helm operator deploys a clean database pod and replays the verified S3 WORM stream up to the exact millisecond before the incident.
-* **RPO / RTO:** Achieves **RPO = 0** (zero lost records) and **RTO < 15 minutes** (compared to standard 3-week municipal disaster outages).
+### 2. Cryptographic Write-Ahead Ledger
+* **SHA-256 Hash Chaining:** Every committed state change computes an append-only cryptographic digest linked to its parent record:
+```
+Hash(n) = SHA-256(Payload(n) || Hash(n-1) || Timestamp || SequenceID)
+```
+* **Hardware WORM Storage:** Ledger batches are asynchronously committed to AWS S3 Object Lock in **Compliance Mode** (Write Once, Read Many). Objects cannot be overwritten, modified, or deleted by any user or compromised IAM role until statutory retention periods expire.
+* **Automated Audit Verification:** Background reconcilers continuously recompute hash chains across historical intervals. Any unauthorized manual update to a historical row immediately invalidates downstream hashes, pinpointing the corrupted record.
+
+### 3. Autonomous AI Telemetry Sentry (Model Context Protocol - MCP)
+* **Real-Time Instrumentation:** Exposes runtime query velocity, payload entropy, and connection telemetry via the **Model Context Protocol (MCP)**.
+* **Heuristic Threat Detection:** An AI evaluation agent inspects real-time query metrics, monitoring for:
+  * Shannon entropy spikes across text columns (hallmark of bulk ransomware payload encryption).
+  * Rapid sequential `UPDATE` operations spanning non-contiguous tables during off-peak hours.
+* **Automated Containment:** On threshold breach, the sentry invokes automated MCP tool actions to trip API gateway circuit-breakers and revoke the compromised session's database privileges in under **200 milliseconds**.
+
+### 4. Event-Sourced State Reconciliation
+* **RPO = 0 Guarantee:** Because raw, verified events are stored in immutable cloud storage, database recovery does not depend on stale daily snapshots.
+* **Kubernetes Replay Engine:** When a primary database failure occurs, an automated operator provisions a clean database pod within an isolated VPC, replaying the verified WORM event stream from genesis to the exact millisecond before failure, achieving **RTO < 15 minutes**.
 
 ---
 
-## 📈 Macro-Economic & National Impact
+## 📊 Performance Benchmarks (Local Cluster Target)
 
-* **$47 Trillion U.S. Real Estate Defense:** Protects county land registries so property titles and mortgages cannot be frozen or corrupted.
-* **$18.9 Billion Taxpayer Savings:** Cuts municipal recovery time from weeks to 15 minutes, neutralizing extortion demands.
-* **Federal Alignment:** Directly executes **White House Executive Order 14028** (Zero-Trust Cybersecurity) and **GAO-23-106203** (Critical Legacy IT Modernization).
+| Metric | Target Specification | Architectural Enabler |
+| :--- | :--- | :--- |
+| **Ingestion Latency (p99)** | `< 12 ms` | Go / Sarama Kafka async producer |
+| **Throughput Capacity** | `25,000 writes/sec` | Partitioned Kafka topics + batch consumer |
+| **Tamper Detection Window** | `Real-Time (< 500 ms)` | Continuous hash-chain state auditor |
+| **Automated Threat Isolation** | `< 200 ms` | MCP telemetry proxy + automated circuit breaker |
+| **Recovery Time Objective (RTO)** | `< 15 minutes` | Containerized event-sourcing replay operator |
+| **Recovery Point Objective (RPO)** | `0 records lost` | Distributed WAL replication + Kafka EOS |
 
 ---
 
-## 🚀 Quickstart & Deployment
+## 🛠️ Quickstart (Local Docker Environment)
 
+### Prerequisites
+* Docker & Docker Compose v2.20+
+* Go 1.22+ (for local test client)
+
+### 1. Launch the Infrastructure Stack
 ```bash
 # Clone the repository
 git clone https://github.com/YOUR_USERNAME/zerotrust-vault.git
 cd zerotrust-vault
 
-# Launch local Kafka, PostgreSQL, and Vault cluster via Docker Compose
+# Spin up PostgreSQL with logical replication, Kafka, Zookeeper, and Vault Agent
 docker-compose up -d
-
-# Verify pipeline health
-curl http://localhost:8080/health
 ```
+
+### 2. Verify Pipeline Ingestion
+```bash
+# Check status of Debezium CDC connector
+curl -s http://localhost:8083/connectors/municipal-source/status | jq .
+
+# Verify Kafka consumer output on mock deed mutations
+docker exec -it kafka /bin/kafka-console-consumer \
+  --bootstrap-server localhost:9092 \
+  --topic municipal.records.deeds \
+  --from-beginning
+```
+
+
+## 📜 Architecture Decision Records (ADRs)
+* **ADR-001:** [Selection of Debezium CDC over Dual-Write Application Patterns](docs/adr/ADR-001-CDC-vs-DualWrite.md)
+* **ADR-002:** [Two-Phase Commit vs. Saga for Low-Level WAL Stream Ingestion](docs/adr/ADR-002-2PC-vs-Saga.md)
+* **ADR-003:** [Model Context Protocol (MCP) for Telemetry-Driven Automated Mitigation](docs/adr/ADR-003-MCP-Integration.md)
 
 ---
 
 ## 📄 License
-This project is open-source and licensed under the [MIT License](LICENSE).
+This project is licensed under the [MIT License](LICENSE).
